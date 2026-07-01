@@ -1,0 +1,6 @@
+rank,candidate_id,candidate_name,final_score,semantic_score,signal_score,eligibility_score,key_matching_skills,missing_skills
+1,1,alice smith,0.6951409498450806,0.9203459024429321,0.4498933287453816,0.5,python; sql; tensorflow,aws; pytorch
+2,4,diana prince,0.6863770903231154,0.868205189704895,0.5075816515688933,0.5,python; aws; pytorch,sql; tensorflow
+3,5,eve davis,0.6847663555409091,0.8715144395828247,0.6966971191649893,0.2,python,sql; aws; pytorch; tensorflow
+4,2,bob jones,0.5997853101743519,0.7594130039215088,0.400262694045325,0.5,,python; sql; aws; pytorch; tensorflow
+5,3,charlie brown,0.5472593023777008,0.8165186047554016,0.13,0.5,python,sql; aws; pytorch; tensorflow

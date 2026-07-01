@@ -1,0 +1,11 @@
+Job Title: Machine Learning Engineer
+
+About the Role:
+We are looking for a Machine Learning Engineer to join our AI team. You will be responsible for building, training, and deploying deep learning models. 
+
+Requirements:
+- Strong proficiency in Python
+- Experience with PyTorch or TensorFlow
+- Understanding of data pipelines and SQL
+- Familiarity with cloud platforms like AWS is a plus
+- Ideally 3+ years of experience building production ML models

@@ -1,0 +1,23 @@
+# Virtual environment
+venv/
+env/
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Models and vectors
+backend/models/*.pkl
+backend/vectors/*.index
+
+# Output data
+backend/output/*
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo

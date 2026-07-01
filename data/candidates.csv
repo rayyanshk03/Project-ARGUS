@@ -1,0 +1,6 @@
+id,name,skills,experience_years,education,past_roles,location,last_active_date,application_count,engagement_score,profile_completeness_score
+1,Alice Smith,Python; TensorFlow; SQL,5,MS Computer Science,Senior DS at TechCorp; Data Analyst,New York,2023-10-01,2,85,95
+2,Bob Jones,JavaScript; React; Node.js,3,BS Computer Science,Web Developer at StartupX,San Francisco,2023-10-15,5,60,80
+3,Charlie Brown,Python; Django; PostgreSQL,6,BS Software Engineering,Backend Engineer at MegaCorp,Remote,,1,40,65
+4,Diana Prince,Python; PyTorch; AWS,4,PhD Machine Learning,ML Engineer at E-commerce Inc,London,2023-09-20,3,90,100
+5,Eve Davis,Python; Pandas; Jupyter,0,Bootcamp Graduate,,Austin,2023-10-25,10,100,75
