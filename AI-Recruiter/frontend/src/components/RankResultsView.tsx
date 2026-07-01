@@ -120,6 +120,17 @@ export default function RankResultsView({ candidates, activeJobDesc }: RankResul
 
               {isExpanded && (
                 <div className="px-8 pb-8 pt-4 border-t border-[#35312c]">
+                  {cand.trap_score > 0 && (
+                    <div className={`mb-6 p-4 rounded-lg border flex items-start gap-3 ${cand.trap_score > 0.65 ? 'bg-red-950/30 border-red-900/50 text-red-400' : 'bg-orange-950/30 border-orange-900/50 text-orange-400'}`}>
+                      <div className="font-bold uppercase tracking-wider text-sm mt-0.5">
+                        {cand.trap_score > 0.65 ? 'Critical Trap Penalty' : 'Suspicious Profile'}
+                      </div>
+                      <div className="text-sm">
+                        Trap Score: {(cand.trap_score * 100).toFixed(0)}%. This candidate triggered the anti-cheat heuristics and their final score was heavily penalized.
+                      </div>
+                    </div>
+                  )}
+
                   <div className="mb-8">
                     <h4 className="text-sm font-bold text-[#e6e2db] uppercase tracking-wider mb-4">AI Reasoning</h4>
                     <div className="bg-[#23211e] border border-[#35312c] p-5 rounded-lg text-base text-[#a09c95] italic font-serif">
@@ -130,11 +141,10 @@ export default function RankResultsView({ candidates, activeJobDesc }: RankResul
                   <div>
                     <h4 className="text-sm font-bold text-[#e6e2db] uppercase tracking-wider mb-5">Score Breakdown</h4>
                     <div className="space-y-4 max-w-4xl">
-                      <ScoreRow label="Skills" data={cand.breakdown?.skills || { pct: 69, raw: 0.35 }} />
-                      <ScoreRow label="Career" data={cand.breakdown?.career || { pct: 81, raw: 0.30 }} />
-                      <ScoreRow label="Experience" data={cand.breakdown?.experience || { pct: 100, raw: 0.10 }} />
-                      <ScoreRow label="Location" data={cand.breakdown?.location || { pct: 85, raw: 0.10 }} />
-                      <ScoreRow label="Behavioral" data={cand.breakdown?.behavioral || { pct: 61, raw: 0.15 }} />
+                      <ScoreRow label="Semantic Match" data={{ pct: Math.round((cand.semantic_score || 0) * 100), raw: 0.35 }} />
+                      <ScoreRow label="Skills Match" data={{ pct: Math.round((cand.skill_match_score || 0) * 100), raw: 0.25 }} />
+                      <ScoreRow label="Experience" data={{ pct: Math.round((cand.experience_match_score || 0) * 100), raw: 0.15 }} />
+                      <ScoreRow label="Behavioral" data={{ pct: Math.round((cand.behavior_score || 0) * 100), raw: 0.15 }} />
                     </div>
                   </div>
                 </div>
