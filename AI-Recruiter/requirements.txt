@@ -1,12 +1,7 @@
-fastapi
-uvicorn
-pandas
-numpy
+streamlit
 sentence-transformers
 faiss-cpu
-lightgbm
+pandas
+numpy
 scikit-learn
-pymongo
-anthropic
-python-dotenv
-pydantic
+scipy
