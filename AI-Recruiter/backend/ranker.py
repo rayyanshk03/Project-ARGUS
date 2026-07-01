@@ -1,378 +1,345 @@
-import numpy as np
-from typing import List, Tuple, Dict, Any
-import numpy as np
-from typing import List, Tuple, Dict, Any
+import os
+import json
+import time
+import pandas as pd
+from typing import Dict, Any, List
 
-def sigmoid(x: float) -> float:
-    return 1 / (1 + np.exp(-x))
+# Local imports
+from embeddings import semantic_search, build_index_if_missing, get_model
+from trap_detector import compute_trap_score
 
-def _match_skill_list(target_skills: List[str], candidate_skills: List[str]) -> Tuple[float, List[str], List[str]]:
-    """
-    Helper function to evaluate a specific list of target skills.
-    Replaced heavy CrossEncoder with fast string matching to meet CPU constraint.
-    Returns (normalized_score, matched_skills, missing_skills)
-    """
-    if not target_skills:
-        return 1.0, [], []
+try:
+    from sentence_transformers import CrossEncoder
+    CE_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "cross_encoder")
+except ImportError:
+    pass
+
+def load_cross_encoder():
+    print("Loading CrossEncoder for reranking...")
+    model_name_or_path = CE_MODEL_PATH if os.path.exists(CE_MODEL_PATH) else 'cross-encoder/ms-marco-MiniLM-L-6-v2'
+    return CrossEncoder(model_name_or_path)
+
+def parse_jd(jd_path: str) -> Dict[str, Any]:
+    """Basic extraction for the JD text to structured requirements without an LLM call (to save time)."""
+    # In a real scenario, this might use a local lightweight NER model or regex.
+    # For now, we mock the parsed representation based on keywords in the text.
+    with open(jd_path, 'r', encoding='utf-8') as f:
+        text = f.read().lower()
         
-    candidate_skills_lower = [str(s).lower() for s in (candidate_skills or [])]
+    reqs = {
+        "role_title": "Software Engineer",
+        "seniority_level": "Mid-Senior",
+        "industry_domain": "Technology",
+        "required_skills": [],
+        "min_experience_years": 3.0
+    }
     
-    matched = []
-    missing = []
-    total_score = 0.0
+    # Very basic regex/keyword extraction for the hackathon
+    tech_keywords = ["python", "java", "react", "aws", "docker", "kubernetes", "fastapi", "sql", "node", "typescript"]
+    reqs["required_skills"] = [k for k in tech_keywords if k in text]
     
-    # Fast path: Substring matching (e.g. "react" inside "react.js")
-    for req_skill in target_skills:
-        req_lower = req_skill.lower()
-        found = False
+    if "senior" in text or "lead" in text:
+        reqs["min_experience_years"] = 5.0
+        reqs["seniority_level"] = "Senior"
         
-        for cand_skill in candidate_skills_lower:
-            if req_lower in cand_skill or cand_skill in req_lower:
-                found = True
-                break
-                
-        if found:
-            matched.append(req_skill)
-            total_score += 1.0
-        else:
-            missing.append(req_skill)
-        
-    normalized_score = total_score / len(target_skills) if target_skills else 1.0
-    return normalized_score, matched, missing
+    return reqs
 
-def skill_match_score(required_skills: List[str], nice_to_have_skills: List[str], candidate_skills: List[str]) -> Tuple[float, List[str], List[str]]:
-    """
-    Evaluates how well a candidate's skills match the JD.
-    Fast CPU-only matching (O(N) string search, no neural networks here).
-    """
-    req_score, req_matched, req_missing = _match_skill_list(required_skills, candidate_skills)
-    nice_score, nice_matched, nice_missing = _match_skill_list(nice_to_have_skills, candidate_skills)
+def load_candidates_streaming(candidates_path: str) -> List[Dict[str, Any]]:
+    """Stream jsonl to avoid loading 465MB entirely into RAM at once, just keep what we need."""
+    print("Streaming candidates...")
+    candidates = []
+    required_cols = ["candidate_id", "name", "experience_years", "skills", "redrob_signals", "raw_resume_text", "profile", "education", "career_history"]
     
-    if not required_skills and not nice_to_have_skills:
-        return 1.0, [], []
-        
-    # Weight required skills at 80% and nice-to-have at 20%
-    if not required_skills:
-        final_score = nice_score
-    elif not nice_to_have_skills:
-        final_score = req_score
-    else:
-        final_score = (0.8 * req_score) + (0.2 * nice_score)
-        
-    all_matched = req_matched + nice_matched
-    all_missing = req_missing + nice_missing
-    
-    return final_score, all_matched, all_missing
-
-
-def experience_match_score(jd_min_years: float, candidate_years: float) -> float:
-    """
-    Calculates an experience match score.
-    Overqualification yields a small capped bonus.
-    Underqualification yields a linear penalty floored at 0.2.
-    """
-    if candidate_years is None:
-        candidate_years = 0.0
-    if jd_min_years is None:
-        jd_min_years = 0.0
-        
     try:
-        candidate_years = float(candidate_years)
-        jd_min_years = float(jd_min_years)
-    except ValueError:
-        candidate_years = 0.0
+        with open(candidates_path, 'r', encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                if not line.strip(): continue
+                data = json.loads(line)
+                c = {k: data.get(k) for k in required_cols}
+                # Fix id if needed
+                if not c.get("candidate_id") and "_id" in data:
+                    c["candidate_id"] = str(data["_id"])
+                elif not c.get("candidate_id"):
+                    c["candidate_id"] = f"CAND_{i}"
+                candidates.append(c)
+    except Exception as e:
+        print(f"Error loading {candidates_path}: {e}")
         
-    if jd_min_years <= 0:
+    return candidates
+
+def experience_score(candidate_experience_years: float, jd_min_years: float) -> float:
+    exp = candidate_experience_years
+    if exp >= jd_min_years * 1.5:
+        return 0.9
+    elif jd_min_years <= exp < jd_min_years * 1.5:
         return 1.0
-        
-    if candidate_years >= jd_min_years:
-        # Small bonus for overqualification capped at 1.0. 
-        # (Since it's a 0-1 scale, we cap strictly at 1.0 to avoid breaking down-stream weights)
-        bonus = (candidate_years - jd_min_years) * 0.05
-        return min(1.0, 0.95 + bonus) 
+    elif exp >= jd_min_years * 0.8:
+        return 0.75
+    elif exp >= jd_min_years * 0.5:
+        return 0.50
     else:
-        # Linear penalty for being below requirement
-        score = candidate_years / jd_min_years
-        # Floor at 0.2 so they aren't zeroed out completely
-        return max(0.2, score)
+        return 0.20
 
-
-def education_match_score(jd_edu: str, candidate_edu_list: List[dict]) -> float:
-    """
-    1 if meets/exceeds requirement, 0.5 if close, 0.2 if not.
-    """
-    if not jd_edu:
-        return 1.0
-        
-    jd_edu_lower = str(jd_edu).lower()
-    
-    degree_levels = {
-        "phd": 4, "doctorate": 4,
-        "master": 3, "ms": 3, "ma": 3,
-        "bachelor": 2, "bs": 2, "ba": 2,
-        "associate": 1,
-        "high school": 0
-    }
-    
-    jd_level = 0
-    for kw, level in degree_levels.items():
-        if kw in jd_edu_lower:
-            jd_level = max(jd_level, level)
-            
-    if not candidate_edu_list:
-        return 0.2
-        
-    cand_level = 0
-    for edu in candidate_edu_list:
-        deg = str(edu.get("degree", "")).lower()
-        for kw, level in degree_levels.items():
-            if kw in deg:
-                cand_level = max(cand_level, level)
-                
-    if cand_level >= jd_level:
-        return 1.0
-    elif cand_level == jd_level - 1:
+def compute_behavior_score(candidate: Dict[str, Any]) -> float:
+    sigs = candidate.get("redrob_signals", {})
+    if not sigs:
         return 0.5
-    return 0.2
-
-
-def build_ranking_features(jd_reqs: dict, semantic_score: float, candidate: dict) -> dict:
-    """
-    Build a feature matrix row for a (job, candidate) pair.
-    """
-    import sys
-    import os
-    # Ensure we can import behavior
-    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    from behavior import predict_behavior_score
+    # Aggregate specific positive signals
+    score = 0.0
     
-    req_skills = jd_reqs.get("required_skills", [])
-    nice_skills = jd_reqs.get("nice_to_have_skills", [])
+    # Recency / Responsiveness
+    rr = sigs.get("recruiter_response_rate", 0.5)
+    score += rr * 0.4
+    
+    # Activity
+    views = min(1.0, sigs.get("profile_views_received_30d", 0) / 100.0)
+    score += views * 0.3
+    
+    # Quality / GitHub
+    gh = min(1.0, max(0.0, sigs.get("github_activity_score", 0) / 50.0))
+    score += gh * 0.3
+    
+    return min(1.0, score)
+
+def compute_education_score(candidate: Dict[str, Any]) -> float:
+    # Simplified logic for hackathon
+    edu = candidate.get("education", [])
+    if edu:
+        return 1.0
+    return 0.5
+
+def compute_completeness_bonus(candidate: Dict[str, Any]) -> float:
+    sigs = candidate.get("redrob_signals", {})
+    comp = sigs.get("profile_completeness_score", 50.0)
+    return min(1.0, comp / 100.0)
+
+def extract_skills_list(candidate: Dict[str, Any]) -> List[str]:
+    skills = candidate.get("skills", [])
+    if isinstance(skills, list) and len(skills) > 0 and isinstance(skills[0], dict):
+        return [s.get("name", "").lower() for s in skills]
+    elif isinstance(skills, list):
+        return [str(s).lower() for s in skills]
+    return []
+
+def build_reasoning(candidate: Dict[str, Any], scores: Dict[str, float], jd_requirements: Dict[str, Any]) -> str:
+    cand_name = candidate.get("name") or candidate.get("profile", {}).get("anonymized_name", "Candidate")
+    exp_years = candidate.get("experience_years", 0)
+    
+    req_skills = [s.lower() for s in jd_requirements.get("required_skills", [])]
+    cand_skills = extract_skills_list(candidate)
+    
+    matched = list(set(cand_skills).intersection(set(req_skills)))
+    matched_count = len(matched)
+    req_count = len(req_skills) if req_skills else 1
+    
+    skill_coverage = matched_count / req_count
+    
+    top_2_matched = ", ".join(matched[:2]) if matched else "core requirements"
+    top_domain = jd_requirements.get("industry_domain", "tech")
+    
+    missing = list(set(req_skills) - set(cand_skills))
+    top_missing = missing[0] if missing else "other specific tools"
+    
+    sigs = candidate.get("redrob_signals", {})
+    # Fake recency for string template
+    views = sigs.get("profile_views_received_30d", 0)
+    recent_active = views > 10
+    
+    if skill_coverage >= 0.8:
+        return f"{cand_name} directly matches {matched_count} of {req_count} required skills including {top_2_matched} with {exp_years} years of experience{', recently active on the platform' if recent_active else ''}."
+    elif skill_coverage >= 0.5:
+        gap_note = f"May need onboarding for {top_missing}." if missing else ""
+        return f"Strong semantic alignment with the role requirements; covers {matched_count} required skills and shows relevant experience in {top_domain}. {gap_note}"
+    else:
+        return f"Relevant background in {top_domain} with transferable skills in {top_2_matched}; may require upskilling in {top_missing}."
+
+def run_ranking(jd_path: str, candidates_path: str, output_path: str):
+    t0 = time.time()
+    
+    # 1. Parse JD
+    t_start = time.time()
+    jd_reqs = parse_jd(jd_path)
+    print(f"1. Parsed JD in {time.time()-t_start:.2f}s")
+    
+    # 2. Load Candidates
+    t_start = time.time()
+    candidates = load_candidates_streaming(candidates_path)
+    cand_dict = {c["candidate_id"]: c for c in candidates}
+    print(f"2. Loaded {len(candidates)} candidates in {time.time()-t_start:.2f}s")
+    
+    # 3. Compute Trap Scores
+    t_start = time.time()
+    # We do this for all candidates first to find twin groups across the whole dataset
+    # In practice for 100k, building a DataFrame takes memory. We'll pass a subset to detect twins or rely on fast iteration
+    trap_results = {}
+    
+    # Minimal DF for behavioral twin detection to save memory
+    twin_df_data = []
+    for c in candidates:
+        if "redrob_signals" in c:
+            row = {"candidate_id": c["candidate_id"]}
+            row.update({k: v for k, v in c["redrob_signals"].items() if isinstance(v, (int, float))})
+            twin_df_data.append(row)
+    twin_df = pd.DataFrame(twin_df_data)
+    
+    for c in candidates:
+        cid = c["candidate_id"]
+        t_score, t_reasons = compute_trap_score(c, all_candidates_df=twin_df, jd_requirements=jd_reqs)
+        trap_results[cid] = t_score
+    print(f"3. Trap scoring complete in {time.time()-t_start:.2f}s")
+    
+    # 4 & 5. FAISS Search
+    t_start = time.time()
+    with open(jd_path, 'r', encoding='utf-8') as f:
+        jd_text = f.read()
+    
+    build_index_if_missing(candidates_path) # Embeds if missing
+    top_500_faiss = semantic_search(jd_reqs, top_k=500)
+    print(f"4 & 5. FAISS retrieval (top 500) in {time.time()-t_start:.2f}s")
+    
+    # 6. Cross-Encoder Reranking
+    t_start = time.time()
+    cross_encoder = load_cross_encoder()
+    
+    # Build pairs
+    pairs = []
+    for cid, sem_score in top_500_faiss:
+        c = cand_dict[cid]
+        c_text = c.get("raw_resume_text", "")
+        pairs.append([jd_text[:1000], c_text[:1000]]) # Truncate for cross encoder limits
+        
+    ce_scores = cross_encoder.predict(pairs)
+    # Normalize cross encoder scores to 0-1
+    ce_min, ce_max = ce_scores.min(), ce_scores.max()
+    if ce_max > ce_min:
+        ce_scores = (ce_scores - ce_min) / (ce_max - ce_min)
+    else:
+        ce_scores = [0.5] * len(pairs)
+    print(f"6. Cross-Encoder reranking in {time.time()-t_start:.2f}s")
+    
+    # 7 & 8 & 9. Final Scoring & Penalties
+    t_start = time.time()
+    req_skills = [s.lower() for s in jd_reqs.get("required_skills", [])]
     jd_min_years = jd_reqs.get("min_experience_years", 0)
-    jd_edu = jd_reqs.get("education_requirement")
     
-    cand_skills = candidate.get("skills", [])
-    cand_exp = candidate.get("experience_years", 0)
-    cand_edu_list = candidate.get("education", [])
+    final_candidates = []
     
-    skill_score, _, _ = skill_match_score(req_skills, nice_skills, cand_skills)
-    exp_score = experience_match_score(jd_min_years, cand_exp)
-    edu_score = education_match_score(jd_edu, cand_edu_list)
-    
-    certs = candidate.get("certifications", [])
-    cert_count = len(certs) if isinstance(certs, list) else 0
-    cert_score = min(1.0, cert_count / 3.0) 
-    
-    projs = candidate.get("projects", [])
-    proj_count = len(projs) if isinstance(projs, list) else 0
-    proj_score = min(1.0, proj_count / 5.0)
-    
-    cand_id = str(candidate.get("_id", candidate.get("candidate_id", "")))
-    behavior_score = predict_behavior_score(cand_id) if cand_id else 0.5
-    
-    return {
-        "candidate_id": cand_id,
-        "semantic_score": float(semantic_score),
-        "skill_match_score": float(skill_score),
-        "experience_match_score": float(exp_score),
-        "education_match_score": float(edu_score),
-        "behavior_score": float(behavior_score),
-        "certifications_count": float(cert_count),
-        "certifications_score": float(cert_score),
-        "projects_count": float(proj_count),
-        "projects_score": float(proj_score)
-    }
-
-
-def generate_synthetic_ranking_labels(df) -> Any:
-    """
-    Generates a weak-supervision ground truth label using a weighted domain formula.
-    
-    NOTE ON LEARNING TO RANK:
-    This lets the LightGBM Ranker (lambdarank) learn to approximate and refine this weighted heuristic.
-    In a real production system, you would REPLACE these synthetic labels with real implicit/explicit 
-    recruiter feedback (e.g., Shortlisted=1, Rejected=0, Hired=2). The LTR model would then learn 
-    nuanced, non-linear interactions between features (e.g., high semantic score matters less if 
-    behavior is zero) that a simple static weighted sum cannot capture.
-    """
-    final_score = (
-        0.35 * df["semantic_score"] +
-        0.20 * df["skill_match_score"] +
-        0.15 * df["experience_match_score"] +
-        0.10 * df["education_match_score"] +
-        0.10 * df["behavior_score"] +
-        0.05 * df["certifications_score"] +
-        0.05 * df["projects_score"]
-    )
-    # LTR targets are usually integer relevance grades (e.g., 0 to 4)
-    relevance_grade = (final_score * 4.0).round().astype(int)
-    return relevance_grade.clip(lower=0, upper=4)
-
-
-def train_ranker():
-    import pandas as pd
-    import lightgbm as lgb
-    import os
-    import pickle
-    from parser import connect_db
-    from embeddings import semantic_search
-    from llm import understand_job_description
-    from bson import ObjectId
-    
-    db = connect_db()
-    candidates = list(db["candidates"].find())
-    if not candidates:
-        print("No candidates found.")
-        return
+    for i, (cid, sem_score) in enumerate(top_500_faiss):
+        c = cand_dict[cid]
         
-    mock_jds = [
-        "Senior Backend Engineer with Python and AWS",
-        "Frontend React Developer 3 years experience",
-        "Data Scientist Machine Learning PhD required",
-        "DevOps Engineer Kubernetes Docker Docker-Compose"
-    ]
-    
-    all_features = []
-    groups = []
-    
-    print("Building synthetic LTR dataset...")
-    for q_idx, query in enumerate(mock_jds):
-        jd_reqs = understand_job_description(query)
-        top_cands = semantic_search(query, top_k=20)
+        # Skill Match Score
+        cand_skills = extract_skills_list(c)
+        matched = len(set(cand_skills).intersection(set(req_skills)))
+        coverage = matched / max(1, len(req_skills))
+        ce_score = ce_scores[i]
+        skill_match_score = (0.6 * coverage) + (0.4 * ce_score)
         
-        group_size = 0
-        for cid, sem_score in top_cands:
-            cand_doc = db["candidates"].find_one({"_id": ObjectId(cid)})
-            if cand_doc:
-                feats = build_ranking_features(jd_reqs, sem_score, cand_doc)
-                feats["job_id"] = q_idx
-                all_features.append(feats)
-                group_size += 1
-                
-        if group_size > 0:
-            groups.append(group_size)
+        # Other scores
+        exp_score = experience_score(float(c.get("experience_years", 0) or 0), jd_min_years)
+        beh_score = compute_behavior_score(c)
+        edu_score = compute_education_score(c)
+        comp_bonus = compute_completeness_bonus(c)
         
-    if not all_features:
-        print("No feature data generated.")
-        return
+        base_score = (
+            0.35 * sem_score +
+            0.25 * skill_match_score +
+            0.15 * exp_score +
+            0.15 * beh_score +
+            0.05 * edu_score +
+            0.05 * comp_bonus
+        )
         
-    df = pd.DataFrame(all_features)
-    y = generate_synthetic_ranking_labels(df)
-    X = df.drop(columns=["candidate_id", "job_id"])
-    
-    print("Training LightGBM Ranker (LambdaRank)...")
-    model = lgb.LGBMRanker(
-        objective="lambdarank",
-        metric="ndcg",
-        n_estimators=100,
-        learning_rate=0.05,
-        verbosity=-1
-    )
-    
-    model.fit(X, y, group=groups)
-    
-    models_dir = os.path.join(os.path.dirname(__file__), "models")
-    os.makedirs(models_dir, exist_ok=True)
-    with open(os.path.join(models_dir, "lightgbm_ranker.pkl"), 'wb') as f:
-        pickle.dump(model, f)
+        # Apply trap penalty
+        trap_score = trap_results.get(cid, 0)
+        multiplier = 1.0
+        if trap_score > 0.65:
+            multiplier = 0.2
+        elif trap_score >= 0.40:
+            multiplier = 0.6
+            
+        final_score = base_score * multiplier
         
-    print("Ranker trained and saved successfully.")
-
-
-def rank_candidates(jd_requirements: dict, candidate_pool: List[Tuple[str, float]]) -> List[dict]:
-    """
-    Runs the full pipeline (semantic_search -> skill/experience/education/behavior scoring -> ranker.predict).
-    Falls back gracefully to the plain weighted-sum formula if the trained ranker model file doesn't exist.
-    """
-    import os
-    import pickle
-    import pandas as pd
-    from parser import connect_db
-    from bson import ObjectId
+        scores_dict = {
+            "semantic": sem_score, "skill_match": skill_match_score, 
+            "exp": exp_score, "beh": beh_score, "trap": trap_score
+        }
+        
+        reasoning = build_reasoning(c, scores_dict, jd_reqs)
+        
+        final_candidates.append({
+            "candidate_id": cid,
+            "final_score": final_score,
+            "trap_score": trap_score,
+            "reasoning": reasoning,
+            "twin_group_id": None # Populated in deduplication if needed
+        })
+        
+    print(f"7-9. Final Scoring & Penalties in {time.time()-t_start:.2f}s")
     
-    db = connect_db()
-    results = []
+    # 10. Deduplicate Behavioral Twins
+    # Since trap_detector identifies twins but returns it as a list of twin IDs per candidate, 
+    # we can do a simple graph pass or just a greedy deduplication
+    t_start = time.time()
+    # Sort by final score first
+    final_candidates.sort(key=lambda x: x["final_score"], reverse=True)
     
-    for cid, sem_score in candidate_pool:
-        doc = db["candidates"].find_one({"_id": ObjectId(cid)})
-        if not doc:
+    seen_twins = set()
+    deduped = []
+    
+    for c_obj in final_candidates:
+        cid = c_obj["candidate_id"]
+        # If this candidate is known to be in a twin group that we already selected a rep for, skip
+        if cid in seen_twins:
             continue
             
-        feats = build_ranking_features(jd_requirements, sem_score, doc)
+        # Get twin ids for this candidate (we recompute fast here or cache from step 3)
+        # Assuming we cached from step 3, but let's just use the score sort. 
+        # For full hackathon, we would read twin_ids returned from compute_trap_score
+        # For now, we just add this candidate to deduped
+        deduped.append(c_obj)
         
-        # Attach raw doc fields for transparency in output
-        feats["name"] = doc.get("name", "Unknown")
-        feats["email"] = doc.get("email", "")
-        results.append(feats)
-        
-    if not results:
-        return []
-        
-    df = pd.DataFrame(results)
+        # We would mark their twins as seen
+        # e.g., seen_twins.update(c_obj["twin_ids"])
+    print(f"10. Twin Deduplication in {time.time()-t_start:.2f}s")
     
-    # Fallback formula
-    df["fallback_score"] = (
-        0.35 * df["semantic_score"] +
-        0.20 * df["skill_match_score"] +
-        0.15 * df["experience_match_score"] +
-        0.10 * df["education_match_score"] +
-        0.10 * df["behavior_score"] +
-        0.05 * df["certifications_score"] +
-        0.05 * df["projects_score"]
-    )
+    # 11. Top 100
+    top_100 = deduped[:100]
     
-    model_path = os.path.join(os.path.dirname(__file__), "models", "lightgbm_ranker.pkl")
-    used_model = False
+    # 13. Export CSV
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    if os.path.exists(model_path):
-        try:
-            with open(model_path, 'rb') as f:
-                model = pickle.load(f)
-            X = df.drop(columns=["candidate_id", "name", "email", "fallback_score", "job_id", "final_score"], errors='ignore')
-            df["final_score"] = model.predict(X)
-            used_model = True
-        except Exception as e:
-            print(f"Failed to load ranker model: {e}")
-            df["final_score"] = df["fallback_score"]
-    else:
-        df["final_score"] = df["fallback_score"]
+    records = []
+    for i, c in enumerate(top_100):
+        records.append({
+            "rank": i + 1,
+            "candidate_id": c["candidate_id"],
+            "score": round(c["final_score"], 4),
+            "reasoning": c["reasoning"]
+        })
         
-    df = df.sort_values(by="final_score", ascending=False)
-    out = df.to_dict(orient="records")
+    df_out = pd.DataFrame(records)
+    df_out.to_csv(output_path, index=False)
     
-    for row in out:
-        row["used_ml_ranker"] = used_model
-        
-    return out
-
+    # Assertions
+    assert len(df_out) == 100, f"Output length {len(df_out)} != 100. Dataset might be too small!"
+    assert len(df_out["candidate_id"].unique()) == 100, "Duplicate candidate IDs found in output!"
+    
+    print(f"\n✅ Pipeline Complete! Output saved to {output_path}")
+    print(f"⏱️  Total Time Taken: {time.time()-t0:.2f}s")
 
 if __name__ == "__main__":
-    print("=== Testing CrossEncoder Reranker Module ===")
-    jd_reqs = ["Python", "FastAPI", "Docker"]
-    nice_to_have = ["AWS", "Kubernetes"]
-    jd_min_years = 5
+    # Example local run
+    JD_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "jd.txt")
+    # For testing, we might want to use sample_candidates since full 100k doesn't exist locally here.
+    CAND_PATH = "/Users/rayyanshaikh/Desktop/India_runs_data_and_ai_challenge/sample_candidates.json" 
+    OUT_PATH = os.path.join(os.path.dirname(__file__), "..", "output", "submission.csv")
     
-    # 5 Sample Candidates
-    test_candidates = [
-        {"name": "Alice", "skills": ["Python", "Flask", "Docker", "AWS"], "exp": 4},
-        {"name": "Bob", "skills": ["Java", "Spring", "Kubernetes"], "exp": 2},
-        {"name": "Charlie", "skills": ["python", "FastAPI", "docker", "aws", "kubernetes"], "exp": 6},
-        {"name": "Diana", "skills": ["Django", "Containerization", "GCP"], "exp": 5},
-        {"name": "Eve", "skills": ["Node.js", "Express", "Docker"], "exp": 3}
-    ]
-    
-    print(f"JD Required Skills : {jd_reqs}")
-    print(f"JD Nice-to-have    : {nice_to_have}")
-    print(f"Min Experience     : {jd_min_years} years\n")
-    
-    for c in test_candidates:
-        print(f"▶ Candidate: {c['name']} (Exp: {c['exp']} yrs)")
-        print(f"  Skills: {c['skills']}")
-        
-        skill_score, matched, missing = skill_match_score(jd_reqs, nice_to_have, c["skills"])
-        exp_score = experience_match_score(jd_min_years, c["exp"])
-        
-        print(f"  Matched: {matched}")
-        print(f"  Missing: {missing}")
-        print(f"  Skill Score : {skill_score:.2f} / 1.0")
-        print(f"  Exp Score   : {exp_score:.2f} / 1.0\n")
+    if os.path.exists(JD_PATH) and os.path.exists(CAND_PATH):
+        try:
+            run_ranking(JD_PATH, CAND_PATH, OUT_PATH)
+        except Exception as e:
+            print(f"Error during ranking: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print("Please ensure jd.txt and candidates data paths are valid before running.")
