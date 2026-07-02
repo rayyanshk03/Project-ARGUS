@@ -1,21 +1,30 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Search, Filter, Plus, Trash2, X } from 'lucide-react';
-
-const mockCandidates = [
-  { id: 1, name: 'Sarah Chen', title: 'Senior ML Engineer at DeepMind', experience: '7 yrs', skills: ['Python', 'TensorFlow', 'PyTorch', '+3'], status: 'active' },
-  { id: 2, name: 'Priya Nair', title: 'DevOps Lead at HashiCorp', experience: '8 yrs', skills: ['Terraform', 'Kubernetes', 'Docker', '+3'], status: 'active' },
-  { id: 3, name: 'James Wright', title: 'Full Stack Engineer at Vercel', experience: '4 yrs', skills: ['TypeScript', 'React', 'Node.js', '+2'], status: 'active' },
-  { id: 4, name: 'Aisha Okonkwo', title: 'Data Scientist at Spotify', experience: '6 yrs', skills: ['Python', 'R', 'Machine Learning', '+3'], status: 'active' },
-  { id: 5, name: 'Daniel Park', title: 'Backend Engineer at Cloudflare', experience: '5 yrs', skills: ['Go', 'Rust', 'Distributed Systems', '+3'], status: 'active' },
-  { id: 6, name: 'Emily Torres', title: 'Engineering Manager at Shopify', experience: '9 yrs', skills: ['Leadership', 'React', 'Ruby on Rails', '+2'], status: 'active' },
-  { id: 7, name: 'Ryan Osei', title: 'Security Engineer at Palo Alto Networks', experience: '6 yrs', skills: ['Penetration Testing', 'Python', 'AWS Security', '+2'], status: 'inactive' },
-  { id: 8, name: 'Lisa Bergmann', title: 'UX Designer at Figma', experience: '5 yrs', skills: ['Figma', 'User Research', 'Prototyping', '+2'], status: 'active' },
-  { id: 9, name: 'Kevin Huang', title: 'Platform Engineer at Databricks', experience: '7 yrs', skills: ['Spark', 'Delta Lake', 'Python', '+4'], status: 'active' },
-  { id: 10, name: 'Rachel Kim', title: 'Frontend Engineer at Linear', experience: '3 yrs', skills: ['TypeScript', 'React', 'CSS', '+2'], status: 'active' },
-];
+import { searchCandidates } from '../lib/api';
 
 export default function CandidatesView() {
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [candidates, setCandidates] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  // Optional: load some defaults
+  useEffect(() => {
+    handleSearch('');
+  }, []);
+
+  const handleSearch = async (queryToSearch = searchQuery) => {
+    setLoading(true);
+    try {
+      // Just query anything to get the top 20 candidates if empty
+      const res = await searchCandidates(queryToSearch || "engineer", 20);
+      setCandidates(res.results || []);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="w-full px-8 md:px-12 mt-14 animate-in fade-in duration-300">
@@ -40,10 +49,16 @@ export default function CandidatesView() {
           <input 
             type="text" 
             placeholder="Search by name, skills, title..." 
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
             className="w-full bg-[#1c1a17] border border-[#35312c] rounded-l-lg py-3.5 pl-12 pr-4 text-lg text-[#e6e2db] focus:outline-none focus:border-[#5a544a]"
           />
-          <button className="bg-[#9a5633] hover:bg-[#b0623a] text-white px-8 text-lg font-medium rounded-r-lg transition-colors">
-            Search
+          <button 
+            onClick={() => handleSearch()}
+            className="bg-[#9a5633] hover:bg-[#b0623a] text-white px-8 text-lg font-medium rounded-r-lg transition-colors"
+          >
+            {loading ? 'Searching...' : 'Search'}
           </button>
         </div>
         <div className="flex-1" />
@@ -64,28 +79,29 @@ export default function CandidatesView() {
             </tr>
           </thead>
           <tbody className="text-base">
-            {mockCandidates.map((cand) => (
-              <tr key={cand.id} className="border-b border-[#35312c]/50 hover:bg-white/5 transition-colors group">
+            {candidates.map((cand, idx) => (
+              <tr key={cand.candidate_id || idx} className="border-b border-[#35312c]/50 hover:bg-white/5 transition-colors group">
                 <td className="py-5 pr-4">
-                  <div className="font-semibold text-lg text-[#e6e2db]">{cand.name}</div>
-                  <div className="text-sm text-[#8b8680] mt-1">{cand.title}</div>
+                  <div className="font-semibold text-lg text-[#e6e2db]">{cand.name || 'Unknown Name'}</div>
+                  <div className="text-sm text-[#8b8680] mt-1">{cand.title || 'Unknown Title'}</div>
                 </td>
-                <td className="py-5 text-[#e6e2db]">{cand.experience}</td>
+                <td className="py-5 text-[#e6e2db]">{cand.experience_years} yrs</td>
                 <td className="py-5">
                   <div className="flex flex-wrap gap-2">
-                    {cand.skills.map((skill, idx) => (
-                      <span key={idx} className="bg-[#2a2724] text-[#a09c95] px-2.5 py-1.5 rounded-md text-sm">
-                        {skill}
+                    {(cand.skills || []).slice(0, 4).map((skill: any, sIdx: number) => (
+                      <span key={sIdx} className="bg-[#2a2724] text-[#a09c95] px-2.5 py-1.5 rounded-md text-sm">
+                        {typeof skill === 'string' ? skill : skill.name}
                       </span>
                     ))}
+                    {(cand.skills?.length > 4) && (
+                      <span className="bg-[#2a2724] text-[#a09c95] px-2.5 py-1.5 rounded-md text-sm">
+                        +{cand.skills.length - 4}
+                      </span>
+                    )}
                   </div>
                 </td>
                 <td className="py-5">
-                  {cand.status === 'active' ? (
-                    <span className="text-green-500 border border-green-500/20 px-2.5 py-1.5 rounded-md text-sm font-medium bg-green-500/10">active</span>
-                  ) : (
-                    <span className="text-[#8b8680] border border-[#35312c] px-2.5 py-1.5 rounded-md text-sm font-medium bg-[#2a2724]">inactive</span>
-                  )}
+                  <span className="text-green-500 border border-green-500/20 px-2.5 py-1.5 rounded-md text-sm font-medium bg-green-500/10">active</span>
                 </td>
                 <td className="py-5 text-right">
                   <button className="text-[#6e6a64] hover:text-white transition-colors p-2">
@@ -94,6 +110,11 @@ export default function CandidatesView() {
                 </td>
               </tr>
             ))}
+            {candidates.length === 0 && !loading && (
+              <tr>
+                <td colSpan={5} className="py-10 text-center text-[#8b8680]">No candidates found. Try a different search.</td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

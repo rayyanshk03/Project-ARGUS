@@ -2,7 +2,7 @@ import os
 import json
 import time
 import pandas as pd
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 # Local imports
 from embeddings import semantic_search, build_index_if_missing, get_model
@@ -51,17 +51,42 @@ def load_candidates_streaming(candidates_path: str) -> List[Dict[str, Any]]:
     required_cols = ["candidate_id", "name", "experience_years", "skills", "redrob_signals", "raw_resume_text", "profile", "education", "career_history"]
     
     try:
-        with open(candidates_path, 'r', encoding='utf-8') as f:
-            for i, line in enumerate(f):
-                if not line.strip(): continue
-                data = json.loads(line)
-                c = {k: data.get(k) for k in required_cols}
-                # Fix id if needed
-                if not c.get("candidate_id") and "_id" in data:
-                    c["candidate_id"] = str(data["_id"])
-                elif not c.get("candidate_id"):
-                    c["candidate_id"] = f"CAND_{i}"
-                candidates.append(c)
+        if candidates_path.endswith('.jsonl') or candidates_path.endswith('.gz'):
+            import gzip
+            open_func = gzip.open if candidates_path.endswith('.gz') else open
+            mode = 'rt' if candidates_path.endswith('.gz') else 'r'
+            with open_func(candidates_path, mode, encoding='utf-8') as f:
+                for i, line in enumerate(f):
+                    if not line.strip(): continue
+                    data = json.loads(line)
+                    c_id = data.get("candidate_id") or str(data.get("_id", f"CAND_{i}"))
+                    candidates.append({
+                        "candidate_id": c_id,
+                        "name": data.get("name", "Unknown"),
+                        "experience_years": data.get("experience_years", 0),
+                        "skills": data.get("skills", []),
+                        "redrob_signals": data.get("redrob_signals", {}),
+                        "raw_resume_text": data.get("raw_resume_text", ""),
+                        "profile": data.get("profile", {}),
+                        "education": data.get("education", []),
+                        "career_history": data.get("career_history", [])
+                    })
+        else:
+            with open(candidates_path, 'r', encoding='utf-8') as f:
+                data_list = json.load(f)
+                for i, data in enumerate(data_list):
+                    c_id = data.get("candidate_id") or str(data.get("_id", f"CAND_{i}"))
+                    candidates.append({
+                        "candidate_id": c_id,
+                        "name": data.get("name", "Unknown"),
+                        "experience_years": data.get("experience_years", 0),
+                        "skills": data.get("skills", []),
+                        "redrob_signals": data.get("redrob_signals", {}),
+                        "raw_resume_text": data.get("raw_resume_text", ""),
+                        "profile": data.get("profile", {}),
+                        "education": data.get("education", []),
+                        "career_history": data.get("career_history", [])
+                    })
     except Exception as e:
         print(f"Error loading {candidates_path}: {e}")
         
@@ -122,7 +147,6 @@ def extract_skills_list(candidate: Dict[str, Any]) -> List[str]:
     return []
 
 def build_reasoning(candidate: Dict[str, Any], scores: Dict[str, float], jd_requirements: Dict[str, Any]) -> str:
-    cand_name = candidate.get("name") or candidate.get("profile", {}).get("anonymized_name", "Candidate")
     exp_years = candidate.get("experience_years", 0)
     
     req_skills = [s.lower() for s in jd_requirements.get("required_skills", [])]
@@ -134,24 +158,24 @@ def build_reasoning(candidate: Dict[str, Any], scores: Dict[str, float], jd_requ
     
     skill_coverage = matched_count / req_count
     
-    top_2_matched = ", ".join(matched[:2]) if matched else "core requirements"
-    top_domain = jd_requirements.get("industry_domain", "tech")
+    top_2_matched = ", ".join(matched[:2]) if len(matched) >= 2 else (", ".join(matched) if matched else "key skills")
+    top_domain = jd_requirements.get("industry_domain", "the industry")
     
     missing = list(set(req_skills) - set(cand_skills))
-    top_missing = missing[0] if missing else "other specific tools"
+    missing_skill = missing[0] if missing else "required areas"
+    top_skill = cand_skills[0] if cand_skills else "general tech"
     
     sigs = candidate.get("redrob_signals", {})
-    # Fake recency for string template
     views = sigs.get("profile_views_received_30d", 0)
-    recent_active = views > 10
+    recency_note = ", recently active" if views > 10 else ""
+    gap_note = f", missing {missing_skill}" if missing else ""
     
     if skill_coverage >= 0.8:
-        return f"{cand_name} directly matches {matched_count} of {req_count} required skills including {top_2_matched} with {exp_years} years of experience{', recently active on the platform' if recent_active else ''}."
+        return f"Directly matches {matched_count} of {req_count} required skills including {top_2_matched}, {exp_years} years experience{recency_note}."
     elif skill_coverage >= 0.5:
-        gap_note = f"May need onboarding for {top_missing}." if missing else ""
-        return f"Strong semantic alignment with the role requirements; covers {matched_count} required skills and shows relevant experience in {top_domain}. {gap_note}"
+        return f"Strong semantic alignment in {top_domain}, covers {matched_count} required skills, {exp_years} years experience{gap_note}."
     else:
-        return f"Relevant background in {top_domain} with transferable skills in {top_2_matched}; may require upskilling in {top_missing}."
+        return f"Relevant background in {top_domain} with transferable skills in {top_skill}, may require upskilling in {missing_skill}."
 
 def run_ranking(jd_path: str, candidates_path: str, output_path: str):
     t0 = time.time()
@@ -331,7 +355,7 @@ if __name__ == "__main__":
     # Example local run
     JD_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "jd.txt")
     # For testing, we might want to use sample_candidates since full 100k doesn't exist locally here.
-    CAND_PATH = "/Users/rayyanshaikh/Desktop/India_runs_data_and_ai_challenge/sample_candidates.json" 
+    CAND_PATH = os.environ.get("ACTIVE_CANDIDATES_PATH", "/Users/rayyanshaikh/Desktop/India_runs_data_and_ai_challenge/sample_candidates.json")
     OUT_PATH = os.path.join(os.path.dirname(__file__), "..", "output", "submission.csv")
     
     if os.path.exists(JD_PATH) and os.path.exists(CAND_PATH):
@@ -343,6 +367,106 @@ if __name__ == "__main__":
             traceback.print_exc()
     else:
         print("Please ensure jd.txt and candidates data paths are valid before running.")
+
+def rank_for_ui(jd_text: str) -> List[Dict[str, Any]]:
+    import os
+    from llm import understand_job_description
+    
+    # 1. Parse JD using existing logic
+    jd_reqs = understand_job_description(jd_text)
+    
+    # 2. Load Candidates from JSON
+    CAND_PATH = os.environ.get("ACTIVE_CANDIDATES_PATH", "/Users/rayyanshaikh/Desktop/India_runs_data_and_ai_challenge/sample_candidates.json")
+    candidates = load_candidates_streaming(CAND_PATH)
+    cand_dict = {c["candidate_id"]: c for c in candidates}
+    
+    # 3. FAISS Search
+    build_index_if_missing(CAND_PATH)
+    top_500_faiss = semantic_search(jd_reqs, top_k=min(100, len(candidates)))
+    
+    # 4. Cross Encoder
+    cross_encoder = load_cross_encoder()
+    pairs = []
+    valid_faiss = []
+    for cid, sem_score in top_500_faiss:
+        c = cand_dict.get(cid)
+        if not c: continue
+        c_text = c.get("raw_resume_text", "")
+        pairs.append([jd_text[:1000], c_text[:1000]])
+        valid_faiss.append((cid, sem_score))
+        
+    ce_scores = cross_encoder.predict(pairs) if pairs else []
+    if len(ce_scores) > 0:
+        ce_min, ce_max = ce_scores.min(), ce_scores.max()
+        if ce_max > ce_min:
+            ce_scores = (ce_scores - ce_min) / (ce_max - ce_min)
+        else:
+            ce_scores = [0.5] * len(pairs)
+            
+    # Final Scoring
+    req_skills = [s.lower() for s in jd_reqs.get("required_skills", [])]
+    jd_min_years = jd_reqs.get("min_experience_years", 0)
+    
+    final_candidates = []
+    for i, (cid, sem_score) in enumerate(valid_faiss):
+        c = cand_dict[cid]
+        c["candidate_id"] = cid
+        
+        prof = c.get("profile", {})
+        c["title"] = prof.get("headline", "Candidate")
+        c["location"] = prof.get("location", "Remote")
+        
+        career = c.get("career_history", [])
+        if isinstance(career, list) and len(career) > 0 and isinstance(career[0], dict):
+            c["company"] = career[0].get("company", "Unknown")
+            c["title"] = career[0].get("title", c["title"])
+        else:
+            c["company"] = "Unknown"
+            
+        cand_skills = extract_skills_list(c)
+        matched = len(set(cand_skills).intersection(set(req_skills)))
+        coverage = matched / max(1, len(req_skills))
+        ce_score = ce_scores[i]
+        skill_match_score = (0.6 * coverage) + (0.4 * ce_score)
+        
+        exp_score = experience_score(float(c.get("experience_years", 0) or 0), jd_min_years)
+        beh_score = compute_behavior_score(c)
+        edu_score = compute_education_score(c)
+        comp_bonus = compute_completeness_bonus(c)
+        
+        base_score = (
+            0.35 * sem_score +
+            0.25 * skill_match_score +
+            0.15 * exp_score +
+            0.15 * beh_score +
+            0.05 * edu_score +
+            0.05 * comp_bonus
+        )
+        
+        trap_score, _ = compute_trap_score(c, all_candidates_df=None, jd_requirements=jd_reqs)
+        multiplier = 1.0
+        if trap_score > 0.65: multiplier = 0.2
+        elif trap_score >= 0.40: multiplier = 0.6
+            
+        final_score = base_score * multiplier
+        
+        scores_dict = {
+            "semantic": sem_score, "skill_match": skill_match_score, 
+            "exp": exp_score, "beh": beh_score, "trap": trap_score
+        }
+        
+        c["semantic_score"] = sem_score
+        c["skill_match_score"] = skill_match_score
+        c["experience_match_score"] = exp_score
+        c["behavior_score"] = beh_score
+        c["final_score"] = final_score
+        c["trap_score"] = trap_score
+        c["explanation"] = build_reasoning(c, scores_dict, jd_reqs)
+        
+        final_candidates.append(c)
+        
+    final_candidates.sort(key=lambda x: x["final_score"], reverse=True)
+    return final_candidates[:100]
 
 
 def rank_candidates(jd_reqs: Dict[str, Any], pool: List[Tuple[str, float]]) -> List[Dict[str, Any]]:

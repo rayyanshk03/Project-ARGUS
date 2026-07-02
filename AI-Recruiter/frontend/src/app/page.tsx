@@ -17,6 +17,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [selectedCandidate, setSelectedCandidate] = useState<any | null>(null);
   const [activeJobDesc, setActiveJobDesc] = useState<string>('');
+  const [currentJd, setCurrentJd] = useState<string>('');
   const [activeTab, setActiveTab] = useState('Dashboard');
 
   const handleRank = async (jd: string) => {
@@ -100,8 +101,8 @@ export default function Home() {
             
             {/* Left Column: Inputs & Tools */}
             <div className="lg:col-span-2 flex flex-col">
-              <JobInput onRank={handleRank} isLoading={loading} />
-              <JDOptimizer />
+              <JobInput onRank={handleRank} isLoading={loading} jd={currentJd} setJd={setCurrentJd} />
+              <JDOptimizer jd={currentJd} />
             </div>
 
             {/* Right Column: Results / Activity */}
@@ -157,7 +158,7 @@ export default function Home() {
       ) : activeTab === 'Ask AI' ? (
         <AskAIView />
       ) : activeTab === 'Fairness Check' ? (
-        <FairnessCheckView onGoHome={() => setActiveTab('Dashboard')} />
+        <FairnessCheckView activeJobDesc={activeJobDesc} onGoHome={() => setActiveTab('Dashboard')} />
       ) : (
         <div className="w-full px-8 mt-12 flex justify-center items-center h-64 text-[#8b8680]">
           {activeTab} view is not implemented yet.

@@ -1,0 +1,35 @@
+{
+    "role_title": "Senior ML Engineer",
+    "seniority_level": "Senior",
+    "required_skills": [
+        "postgresql",
+        "kubernetes",
+        "ml",
+        "machine-learning",
+        "machine learning",
+        "k8s",
+        "py",
+        "python",
+        "postgres",
+        "python3",
+        "pg"
+    ],
+    "nice_to_have_skills": [
+        "amazon web services",
+        "react",
+        "aws",
+        "ec2",
+        "react native",
+        "s3",
+        "reactjs",
+        "react.js"
+    ],
+    "min_experience_years": 5,
+    "industry_domain": "AI & Tech",
+    "soft_skills_mentioned": [],
+    "education_requirement": "",
+    "certifications_mentioned": [],
+    "location_requirement": "Remote (US)",
+    "remote_allowed": true,
+    "special_notes": "Must heavily weight candidates with open source contributions."
+}

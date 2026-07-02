@@ -4,10 +4,11 @@ import { Target, Loader2, Upload, Search, Zap } from 'lucide-react';
 interface JobInputProps {
   onRank: (jd: string) => void;
   isLoading?: boolean;
+  jd: string;
+  setJd: (jd: string) => void;
 }
 
-export default function JobInput({ onRank, isLoading = false }: JobInputProps) {
-  const [jd, setJd] = useState('');
+export default function JobInput({ onRank, isLoading = false, jd, setJd }: JobInputProps) {
   const [activeTab, setActiveTab] = useState('RANK DB');
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -84,11 +85,29 @@ export default function JobInput({ onRank, isLoading = false }: JobInputProps) {
 
         {activeTab === 'UPLOAD FILE' && (
           <div className="flex flex-col gap-5">
-            <div className="border border-dashed border-[#5a544a] rounded-xl p-12 flex flex-col items-center justify-center cursor-pointer hover:bg-white/5 transition-colors">
+            <label className="border border-dashed border-[#5a544a] rounded-xl p-12 flex flex-col items-center justify-center cursor-pointer hover:bg-white/5 transition-colors">
+              <input 
+                type="file" 
+                className="hidden" 
+                accept=".json,.jsonl" 
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  try {
+                    const { uploadCandidatesFile } = await import('../lib/api');
+                    await uploadCandidatesFile(file);
+                    alert("Database uploaded successfully! You can now run ranking on this new dataset.");
+                    setActiveTab('RANK DB');
+                  } catch (err) {
+                    console.error(err);
+                    alert("Failed to upload candidates file.");
+                  }
+                }} 
+              />
               <Upload size={32} className="text-[#a09c95] mb-5" />
-              <div className="text-[#e6e2db] font-medium text-xl mb-3">Upload candidates file</div>
-              <div className="text-[#8b8680] text-base">sample_candidates.json • candidates.jsonl • .json array</div>
-            </div>
+              <div className="text-[#e6e2db] font-medium text-xl mb-3">Upload Candidate Database</div>
+              <div className="text-[#8b8680] text-base">Upload your 100k candidates .json or .jsonl dataset</div>
+            </label>
 
             <div className="border border-[#9a5633]/50 rounded-xl p-6">
               <div className="text-[#e6e2db] font-medium text-base mb-5">Scoring weights</div>

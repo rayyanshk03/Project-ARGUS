@@ -138,25 +138,42 @@ def generate_candidate_embeddings(candidates_path=None):
     
     if not candidates_path:
         # Default fallback for testing
-        candidates_path = "/Users/rayyanshaikh/Desktop/India_runs_data_and_ai_challenge/sample_candidates.json"
+        candidates_path = os.environ.get("ACTIVE_CANDIDATES_PATH", "/Users/rayyanshaikh/Desktop/India_runs_data_and_ai_challenge/sample_candidates.json")
         
     t_load = time.time()
     
     candidates = []
     try:
-        with open(candidates_path, 'r', encoding='utf-8') as f:
-            for i, line in enumerate(f):
-                if not line.strip(): continue
-                data = json.loads(line)
-                c_id = data.get("candidate_id") or str(data.get("_id", f"CAND_{i}"))
-                candidates.append({
-                    "candidate_id": c_id,
-                    "profile": data.get("profile", {}),
-                    "experience_years": data.get("experience_years", 0),
-                    "skills": data.get("skills", []),
-                    "career_history": data.get("career_history", []),
-                    "education": data.get("education", [])
-                })
+        if candidates_path.endswith('.jsonl') or candidates_path.endswith('.gz'):
+            import gzip
+            open_func = gzip.open if candidates_path.endswith('.gz') else open
+            mode = 'rt' if candidates_path.endswith('.gz') else 'r'
+            with open_func(candidates_path, mode, encoding='utf-8') as f:
+                for i, line in enumerate(f):
+                    if not line.strip(): continue
+                    data = json.loads(line)
+                    c_id = data.get("candidate_id") or str(data.get("_id", f"CAND_{i}"))
+                    candidates.append({
+                        "candidate_id": c_id,
+                        "profile": data.get("profile", {}),
+                        "experience_years": data.get("experience_years", 0),
+                        "skills": data.get("skills", []),
+                        "career_history": data.get("career_history", []),
+                        "education": data.get("education", [])
+                    })
+        else:
+            with open(candidates_path, 'r', encoding='utf-8') as f:
+                data_list = json.load(f)
+                for i, data in enumerate(data_list):
+                    c_id = data.get("candidate_id") or str(data.get("_id", f"CAND_{i}"))
+                    candidates.append({
+                        "candidate_id": c_id,
+                        "profile": data.get("profile", {}),
+                        "experience_years": data.get("experience_years", 0),
+                        "skills": data.get("skills", []),
+                        "career_history": data.get("career_history", []),
+                        "education": data.get("education", [])
+                    })
     except Exception as e:
         print(f"Error loading {candidates_path}: {e}")
         
@@ -169,7 +186,7 @@ def generate_candidate_embeddings(candidates_path=None):
     os.makedirs(VECTORS_DIR, exist_ok=True)
     
     texts = [build_candidate_text(c) for c in candidates]
-    ids = [str(c["_id"]) for c in candidates]
+    ids = [str(c["candidate_id"]) for c in candidates]
     
     model = get_model()
     

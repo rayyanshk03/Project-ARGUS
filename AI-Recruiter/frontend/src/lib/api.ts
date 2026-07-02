@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -34,8 +34,20 @@ export const biasCheck = async (jobDescription: string) => {
   return response.data;
 };
 
+export const analyzeJD = async (jobDescription: string) => {
+  const response = await api.post('/analyze-jd', { job_description: jobDescription });
+  return response.data;
+};
+
 export const ragQuery = async (query: string) => {
   const response = await api.post('/rag-query', { query });
+  return response.data;
+};
+
+export const uploadCandidatesFile = async (file: File) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  const response = await api.post('/upload-candidates', formData);
   return response.data;
 };
 

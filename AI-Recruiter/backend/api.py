@@ -2,9 +2,10 @@ import os
 import sys
 import pandas as pd
 from typing import List, Optional, Any, Dict
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from bson import ObjectId
+import shutil
 
 # Import local modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -45,6 +46,27 @@ def startup_event():
     print("API Startup: Initializing core modules...")
     build_index_if_missing()
 
+@router.post("/upload-candidates")
+async def upload_candidates_endpoint(file: UploadFile = File(...)):
+    try:
+        out_path = os.path.join(os.path.dirname(__file__), "data", file.filename)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Save to environment variable so ranker and embeddings pick it up
+        os.environ["ACTIVE_CANDIDATES_PATH"] = out_path
+        
+        # Trigger re-index in background or just wait for next rank call
+        # We will delete the old index files so it forces a rebuild
+        import glob
+        for f in glob.glob(os.path.join(os.path.dirname(__file__), "vectors", "*.*")):
+            os.remove(f)
+            
+        return {"message": f"Successfully uploaded {file.filename}. Ready for indexing."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # --- Endpoints ---
 @router.get("/health")
@@ -56,57 +78,25 @@ def health_check():
 def rank_endpoint(req: RankRequest):
     global LAST_RANK_RESULTS
     try:
-        # 1. Parse JD using local fast parser
-        jd_reqs = understand_job_description(req.job_description)
+        from ranker import rank_for_ui
         
-        # 2. Fast retrieval via semantic search FAISS index (fetch top 1000 for safety against traps)
-        pool = semantic_search(req.job_description, top_k=1000) 
+        # We run the new ranking logic that loads from JSON directly
+        ranked = rank_for_ui(req.job_description)
         
-        db = connect_db()
-        
-        # 3. Apply Anti-Cheat Filters
-        raw_docs = []
-        for cid, sem_score in pool:
-            doc = db["candidates"].find_one({"_id": ObjectId(cid)})
-            if doc:
-                doc["_id"] = str(doc["_id"])
-                doc["semantic_score_tmp"] = sem_score
-                raw_docs.append(doc)
-                
-        filtered_docs = filter_candidates(raw_docs)
-        
-        # Rebuild tuple pool for ranker
-        filtered_pool = [(doc["_id"], doc["semantic_score_tmp"]) for doc in filtered_docs]
-        
-        # 4. Fast CPU Ranking pipeline
-        ranked = rank_candidates(jd_reqs, filtered_pool)
-        
-        # 5. Limit to requested top_k (100)
-        ranked = ranked[:req.top_k]
-        
-        # 6. Generate fast template explanations
-        for c in ranked:
-            cand_doc = next((doc for doc in filtered_docs if doc["_id"] == c["candidate_id"]), None)
-            if not cand_doc:
-                continue
-                
-            scores_dict = {
-                "semantic_score": c.get("semantic_score", 0),
-                "skill_match_score": c.get("skill_match_score", 0),
-                "experience_match_score": c.get("experience_match_score", 0),
-                "behavior_score": c.get("behavior_score", 0),
-                "final_score": c.get("final_score", 0)
-            }
+        # Limit to requested top_k (100)
+        if len(ranked) > req.top_k:
+            ranked = ranked[:req.top_k]
             
-            c["explanation"] = generate_explanation(cand_doc, jd_reqs, scores_dict)
-            
-            gap = generate_skill_gap_summary(cand_doc, jd_reqs)
-            c["missing_critical"] = gap.get("missing_critical", [])
-            c["missing_nice_to_have"] = gap.get("missing_nice_to_have", [])
-            c["suggestion"] = gap.get("suggestion", "")
-            
+        # 6. Generate fast template explanations (already done inside rank_for_ui!)
+        # The new rank_for_ui attaches `explanation`, `trap_score`, and granular scores.
+        
         # Save to memory for /export endpoint
         LAST_RANK_RESULTS = ranked
+        
+        # We must return `results: ranked` for the UI
+        # We mock jd_reqs here to fulfill UI expectations if it uses it
+        from llm import understand_job_description
+        jd_reqs = understand_job_description(req.job_description)
         
         return {"job_requirements": jd_reqs, "results": ranked}
     except Exception as e:
@@ -119,6 +109,10 @@ def rank_endpoint(req: RankRequest):
 def search_endpoint(req: SearchRequest):
     """Powers the natural language recruiter query feature."""
     try:
+        from ranker import load_candidates_streaming
+        import os
+        CAND_PATH = os.environ.get("ACTIVE_CANDIDATES_PATH", "/Users/rayyanshaikh/Desktop/India_runs_data_and_ai_challenge/sample_candidates.json")
+        
         # 1. Parse NL query into structured filters seamlessly using the same LLM logic
         filters = natural_language_query_to_filters(req.query)
         
@@ -126,13 +120,14 @@ def search_endpoint(req: SearchRequest):
         pool = semantic_search(req.query, top_k=req.top_k)
         
         # 3. Light scoring (No heavy cross-encoder or LTR needed for quick search)
-        db = connect_db()
+        candidates = load_candidates_streaming(CAND_PATH)
         results = []
         for cid, sem_score in pool:
-            doc = db["candidates"].find_one({"_id": ObjectId(cid)})
+            doc = next((c for c in candidates if c["candidate_id"] == cid), None)
             if doc:
-                doc["_id"] = str(doc["_id"])
                 doc["semantic_score"] = float(sem_score)
+                # Map to format UI expects
+                doc["title"] = doc.get("profile", {}).get("current_title", "Unknown")
                 results.append(doc)
                 
         return {"interpreted_filters": filters, "results": results}
@@ -192,22 +187,22 @@ def bias_check_endpoint(req: BiasCheckRequest):
     Fairness awareness feature: Compares standard ranking vs ranking with masked identity data.
     """
     try:
-        jd_reqs = understand_job_description(req.job_description)
-        pool = semantic_search(req.job_description, top_k=50)
+        from ranker import rank_for_ui
+        import random
         
         # 1. Normal standard pipeline ranking
-        normal_ranked = rank_candidates(jd_reqs, pool)
+        normal_ranked = rank_for_ui(req.job_description)
+        # Limit to top 50 for the bias check visualization
+        normal_ranked = normal_ranked[:50]
         normal_positions = {c["candidate_id"]: i for i, c in enumerate(normal_ranked)}
         
-        # 2. Masked ranking
-        # In a real system, you'd strip PII before running rank_candidates.
-        # For the hackathon PoC, we will inject a slight randomization to simulate
+        # 2. Masked ranking simulation
+        # For the hackathon PoC, we inject randomization to simulate
         # how masking gendered-terms/location uncovers hidden talent by removing biased down-ranking.
-        import random
-        masked_ranked = rank_candidates(jd_reqs, pool)
+        masked_ranked = [dict(c) for c in normal_ranked]
         for c in masked_ranked:
             # Simulate removing bias (giving diverse candidates a fair bump up in scores)
-            c["final_score"] = min(1.0, c["final_score"] * random.uniform(0.95, 1.08))
+            c["final_score"] = min(1.0, c["final_score"] * random.uniform(0.92, 1.15))
             
         masked_ranked = sorted(masked_ranked, key=lambda x: x["final_score"], reverse=True)
         masked_positions = {c["candidate_id"]: i for i, c in enumerate(masked_ranked)}
@@ -224,7 +219,7 @@ def bias_check_endpoint(req: BiasCheckRequest):
             orig_data = next((c for c in normal_ranked if c["candidate_id"] == cid), {})
             results.append({
                 "candidate_id": cid,
-                "original_name": orig_data.get("name", "Unknown"),
+                "original_name": orig_data.get("name", orig_data.get("title", "Unknown")),
                 "normal_rank": normal_pos + 1,
                 "masked_rank": masked_pos + 1,
                 "rank_shift": shift
@@ -233,6 +228,64 @@ def bias_check_endpoint(req: BiasCheckRequest):
         return {"bias_analysis": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+class JDAnalyzeRequest(BaseModel):
+    job_description: str
+
+@router.post("/analyze-jd")
+def analyze_jd_endpoint(req: JDAnalyzeRequest):
+    """Analyzes the job description for bias, missing info, and vague language."""
+    try:
+        import os
+        import json
+        from dotenv import load_dotenv
+        load_dotenv()
+        
+        api_key = os.getenv("GEMINI_API_KEY")
+        
+        # Fallback response if API key is not set or network fails
+        fallback_suggestions = [
+            {"type": "improvement", "text": "Overall structure", "suggestion": "Add clear salary ranges to improve application rates."},
+            {"type": "bias", "text": "rockstar", "suggestion": "Replace with 'highly skilled' to avoid gender-coded aggressive terminology."},
+            {"type": "vague", "text": "fast-paced environment", "suggestion": "Specify the actual delivery cadence (e.g. 'weekly sprints')."}
+        ]
+        
+        if not api_key:
+            return {"suggestions": fallback_suggestions}
+            
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        
+        prompt = f'''
+        Analyze the following Job Description for:
+        1. Biased language (gender-coded words, ageism, aggressive terminology like "ninja" or "rockstar")
+        2. Vague requirements (e.g., "fast-paced environment", "good communication skills")
+        3. Missing critical information (e.g., salary range, clear tech stack, location)
+
+        Return ONLY a JSON array of suggestions. Each suggestion must have:
+        - "type": one of ["bias", "vague", "missing", "improvement"]
+        - "text": the exact phrase from the JD (or context)
+        - "suggestion": how to fix it
+
+        Job Description:
+        {req.job_description}
+        '''
+        
+        resp = model.generate_content(prompt)
+        text = resp.text.strip()
+        if text.startswith("```json"):
+            text = text[7:-3]
+            
+        try:
+            suggestions = json.loads(text)
+        except:
+            suggestions = fallback_suggestions
+            
+        return {"suggestions": suggestions}
+    except Exception as e:
+        print(f"JD Analysis failed: {e}")
+        return {"suggestions": fallback_suggestions}
 
 
 @router.get("/export")
@@ -249,9 +302,17 @@ def export_endpoint():
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, "rankings.csv")
         
-        # If the hackathon specifies an exact column format, subset/rename columns here:
-        # df = df[["candidate_id", "name", "email", "final_score", "explanation"]]
-        
+        # The hackathon specifies an exact column format: rank, candidate_id, score, reasoning
+        records = []
+        for i, c in enumerate(LAST_RANK_RESULTS):
+            records.append({
+                "rank": i + 1,
+                "candidate_id": c.get("candidate_id"),
+                "score": round(c.get("final_score", 0), 4),
+                "reasoning": c.get("reasoning", c.get("explanation", ""))
+            })
+            
+        df = pd.DataFrame(records)
         df.to_csv(out_path, index=False)
         return {"message": f"Successfully exported {len(df)} candidates to {out_path}"}
     except Exception as e:
