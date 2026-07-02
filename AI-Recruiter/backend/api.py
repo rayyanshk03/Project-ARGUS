@@ -313,9 +313,33 @@ def export_endpoint():
             })
             
         df = pd.DataFrame(records)
+        
+        # STAGE 8 - VALIDATION BEFORE EXPORT
+        print("\n=== STAGE 8 VALIDATION ===")
+        try:
+            assert len(df) == 100, f"Expected 100 rows, got {len(df)}"
+            assert len(df["candidate_id"].unique()) == len(df), "Duplicate candidate_ids found!"
+            
+            # Assert scores strictly descending
+            scores = df["score"].tolist()
+            assert all(scores[i] >= scores[i+1] for i in range(len(scores)-1)), "Scores are not strictly descending!"
+            
+            # Assert reasoning non-empty
+            assert not df["reasoning"].isnull().any(), "Empty reasoning found!"
+            assert all(str(r).strip() != "" for r in df["reasoning"]), "Empty reasoning string found!"
+            
+            # Print GO / NO-GO summary
+            print("[GO] Validation Passed! All constraints met.")
+        except AssertionError as e:
+            print(f"[NO-GO] Validation Failed: {e}")
+            raise HTTPException(status_code=400, detail=f"Validation failed: {e}")
+            
         df.to_csv(out_path, index=False)
-        return {"message": f"Successfully exported {len(df)} candidates to {out_path}"}
+        return {"message": f"Successfully validated and exported {len(df)} candidates to {out_path}", "status": "GO"}
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"Export failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/rag-query")
