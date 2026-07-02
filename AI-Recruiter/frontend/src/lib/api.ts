@@ -47,8 +47,18 @@ export const ragQuery = async (query: string) => {
 export const uploadCandidatesFile = async (file: File) => {
   const formData = new FormData();
   formData.append('file', file);
-  const response = await api.post('/upload-candidates', formData);
-  return response.data;
+  
+  // Use native fetch to completely bypass Axios's global application/json header,
+  // which causes 422 errors, and avoids the boundary stripping issue of manual overrides.
+  const response = await fetch(`${API_BASE_URL}/upload-candidates`, {
+    method: 'POST',
+    body: formData,
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Upload failed with status ${response.status}`);
+  }
+  return await response.json();
 };
 
 export const exportRankings = () => {
